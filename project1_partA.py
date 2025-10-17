@@ -99,23 +99,78 @@ def run_set1_univariate(train: pd.DataFrame, test: pd.DataFrame, X_cols, y_col, 
     pd.DataFrame(rows).to_csv(os.path.join(outdir, "Q1_1_Set1_univariate_results.csv"), index=False)
 
 def run_set2_univariate(train: pd.DataFrame, test: pd.DataFrame, X_cols, y_col, outdir: str):
-    """Q1.2: Raw predictors, raw y, univariate GD per feature."""
+    """Q1.2: Raw predictors & raw y. Optimize in standardized space (per feature),
+    then map the parameters back to raw space exactly; grid-search alpha/iters to
+    maximize Train VE. Different models may use different hyperparameters."""
     Xtr_raw = train[X_cols].to_numpy(float)
     Xte_raw = test[X_cols].to_numpy(float)
     ytr = train[y_col].to_numpy(float)
     yte = test[y_col].to_numpy(float)
 
-    rows = []
+    # Learning-rate grid IN STANDARDIZED SPACE (z = (x - mu)/sd)
+    alpha_grid = [0.1, 0.05, 0.02, 0.01, 0.005, 0.001]
+    iters_grid = [20000, 60000, 120000, 200000]
+
+    rows, positives = [], []
+
     for j, name in enumerate(X_cols):
-        m, b = gd_univariate(Xtr_raw[:, j], ytr, alpha=2e-8, iters=60000)
-        yhat_tr = m * Xtr_raw[:, j] + b
-        yhat_te = m * Xte_raw[:, j] + b
+        xtr = Xtr_raw[:, j]
+        xte = Xte_raw[:, j]
+
+        # Standardize THIS feature only (for optimization stability)
+        mu = float(xtr.mean())
+        sd = float(xtr.std(ddof=0))
+        if sd == 0.0:
+            sd = 1.0
+        ztr = (xtr - mu) / sd
+        zte = (xte - mu) / sd
+
+        # Best-so-far container
+        best = {
+            "alpha": None, "iters": None,
+            "m_raw": None, "b_raw": None,
+            "Train_MSE": float("inf"), "Train_VE": -float("inf"),
+            "Test_MSE": float("inf"),  "Test_VE": -float("inf")
+        }
+
+        # Good intercept init: start near y-mean; slope m starts at 0
+        b0 = float(ytr.mean())
+
+        for iters in iters_grid:
+            for alpha in alpha_grid:
+                # Fit in standardized space: y ≈ m_z * z + b
+                m_z, b_z = gd_univariate(ztr, ytr, alpha=alpha, iters=iters, m0=0.0, b0=b0)
+
+                # Map EXACTLY back to raw-x space:
+                #   y = m_z * (x - mu)/sd + b_z = (m_z/sd) * x + (b_z - m_z*mu/sd)
+                m_raw = m_z / sd
+                b_raw = b_z - (m_z * mu / sd)
+
+                yhat_tr = m_raw * xtr + b_raw
+                yhat_te = m_raw * xte + b_raw
+
+                tr_mse = mse(ytr, yhat_tr)
+                tr_ve  = variance_explained(ytr, yhat_tr)
+                te_mse = mse(yte, yhat_te)
+                te_ve  = variance_explained(yte, yhat_te)
+
+                if tr_ve > best["Train_VE"]:
+                    best.update(dict(alpha=alpha, iters=iters,
+                                     m_raw=m_raw, b_raw=b_raw,
+                                     Train_MSE=tr_mse, Train_VE=tr_ve,
+                                     Test_MSE=te_mse,  Test_VE=te_ve))
+
         rows.append(dict(
-            Predictor=name, m=m, b=b,
-            Train_MSE=mse(ytr, yhat_tr), Train_VE=variance_explained(ytr, yhat_tr),
-            Test_MSE=mse(yte, yhat_te), Test_VE=variance_explained(yte, yhat_te)
+            Predictor=name, alpha=best["alpha"], iters=best["iters"],
+            m=best["m_raw"], b=best["b_raw"],
+            Train_MSE=best["Train_MSE"], Train_VE=best["Train_VE"],
+            Test_MSE=best["Test_MSE"],   Test_VE=best["Test_VE"]
         ))
+        if best["Train_VE"] > 0:
+            positives.append(name)
+
     pd.DataFrame(rows).to_csv(os.path.join(outdir, "Q1_2_Set2_univariate_results.csv"), index=False)
+    print(f"[Q1.2 Raw] Features with positive Train VE: {positives}")
 
 def run_set1_multivariate(train: pd.DataFrame, test: pd.DataFrame, X_cols, y_col, outdir: str):
     """Q2.3: Standardized predictors, multivariate GD."""
